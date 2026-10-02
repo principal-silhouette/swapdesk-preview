@@ -19,7 +19,26 @@ export const DEFAULT_SETTINGS = {
   'rounding.tradeIn': 2000,
   'rounding.quote': 1000,
   'compare.maxDevices': 6,
+  // Daniel, 2 Oct: consoles are valued with one controller; 2 or more controllers add 10,000.
+  'console.extraPad': 10000,
+  // Daniel, 2 Oct: 1–2 games add 5,000; 3 or more add 10,000. Games are reviewed in store.
+  'console.fewGames': 5000,
+  'console.manyGames': 10000,
 };
+
+// Console questions (type Games). Games included and a hacked console are noted and checked in store.
+export const PADS = [
+  { key: '1', label: '1 controller', hint: 'The console with one controller.' },
+  { key: '2', label: '2 or more controllers', hint: 'Adds to your value.' },
+];
+export const GAMES = [
+  { key: 'none', label: 'No games', hint: 'Just the console and controller.' },
+  { key: 'few', label: '1 – 2 games', hint: 'Adds ₦5,000.' },
+  { key: 'many', label: '3 games or more', hint: 'Adds ₦10,000.' },
+];
+export const isConsole = (d) => d?.type === 'Games';
+// Speakers (Daniel, 2 Oct): no deductions; we only take them in perfect condition.
+export const isSpeaker = (d) => d?.type === 'Speakers';
 
 export const NEATNESS = [
   { key: 'spotless', label: 'Spotless', hint: 'No marks at all, like it just left the box.' },
@@ -34,6 +53,7 @@ export const NETWORK = [
   { key: 'esim', label: 'eSIM, unlocked', hint: 'eSIM only (no SIM tray), and works with any network’s eSIM.' },
   { key: 'chip', label: 'Chip unlocked', hint: 'Network locked physical SIM. Works here with an unlock chip or turbo SIM.' },
   { key: 'locked', label: 'eSIM locked', hint: 'eSIM only, tied to one foreign network. Can’t use a local eSIM.' },
+  { key: 'nodata', label: 'Mobile data issue', hint: 'No network or mobile data at all, with any SIM.' },
 ];
 
 // Fault keys match the Site Feed deduction columns.
@@ -114,6 +134,9 @@ export function valueDevice(device, answers = {}, settings = {}) {
   if (answers.icloudLocked) {
     return { accepted: false, reason: 'We can’t accept devices that are iCloud or activation locked. Remove the lock and check again.', start: 0, lines: [], pending: 0, value: 0 };
   }
+  if (isSpeaker(device) && answers.perfect === false) {
+    return { accepted: false, reason: 'We only swap speakers in perfect condition.', start: 0, lines: [], pending: 0, value: 0 };
+  }
   if (!device.tradeIn) {
     return { accepted: false, reason: 'We don’t take this device as a trade-in yet.', start: 0, lines: [], pending: 0, value: 0 };
   }
@@ -123,6 +146,16 @@ export function valueDevice(device, answers = {}, settings = {}) {
   }
 
   const lines = [];
+  if (isConsole(device)) {
+    // A console's only questions: controllers, games included, hacked or not.
+    if (answers.pads === '2') lines.push({ key: 'pads', label: '2 or more controllers', amount: -s(settings, 'console.extraPad') });
+    const g = GAMES.find((x) => x.key === answers.games);
+    if (g && g.key !== 'none') lines.push({ key: 'games', label: `${g.label} included`, amount: -s(settings, g.key === 'many' ? 'console.manyGames' : 'console.fewGames') });
+    if (answers.hacked) lines.push({ key: 'hacked', label: 'Hacked / jailbroken', amount: null });
+    const total = lines.reduce((a, l) => a + (l.amount || 0), 0);
+    const value = Math.max(0, floorTo(start - total, s(settings, 'rounding.quote')));
+    return { accepted: true, start, lines, pending: lines.filter((l) => l.amount === null).length, value };
+  }
   const push = (key, label, base, mult = 1) => {
     if (base === 'n/a') return;
     lines.push({ key, label, amount: typeof base === 'number' ? Math.round(base * mult) : null });
@@ -150,6 +183,8 @@ export function valueDevice(device, answers = {}, settings = {}) {
     if (answers.network === 'chip') push('network', 'Chip unlocked', amountFor(device, 'network'), s(settings, 'network.chipShare'));
     if (answers.network === 'esim' && !/\bAir\b/.test(device.model || '')) push('network', 'eSIM only', amountFor(device, 'network'), s(settings, 'network.esimShare'));
     if (answers.network === 'locked') push('network', 'eSIM locked', amountFor(device, 'network'), s(settings, 'network.lockedShare'));
+    // No network at all costs the same as an eSIM-locked phone: either way it can't be used on a local network.
+    if (answers.network === 'nodata') push('network', 'Mobile data issue', amountFor(device, 'network'), s(settings, 'network.lockedShare'));
   }
 
   // Faults
