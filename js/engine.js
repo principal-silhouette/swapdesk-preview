@@ -17,6 +17,10 @@ export const DEFAULT_SETTINGS = {
   'network.chipMin': 30000,
   'network.esimShare': 0.4, // eSIM-only (no SIM tray), unlocked; not the iPhone Air, which is always eSIM-only
   'network.lockedShare': 1,
+  // Daniel, 7 Oct: one trade-in value per model and storage (Physical SIM + eSIM); the SIM version takes a share off.
+  // eSIM only sells ~10.7% below, Physical SIM only ~2.3% below (Rules D31, D32).
+  'model.esimOnlyShare': 0.893,
+  'model.dualSimShare': 0.977,
   'trueTone.shareOfScreen': 0.5,
   'rounding.tradeIn': 2000,
   'rounding.quote': 1000,
@@ -41,6 +45,35 @@ export const GAMES = [
 export const isConsole = (d) => d?.type === 'Games';
 // Speakers (Daniel, 2 Oct): no deductions; we only take them in perfect condition.
 export const isSpeaker = (d) => d?.type === 'Speakers';
+// iPhone 18 series (Daniel, 7 Oct): for now we only swap them in perfect condition, so no fault questions.
+export const PERFECT_ONLY_SERIES = ['iPhone 18'];
+
+/** SIM version (Daniel, 7 Oct): asked first for every iPhone from the 14 series up, not the Air (always eSIM). */
+export const SIM = [
+  { key: 'both', label: 'Physical SIM + eSIM', hint: 'Has a SIM tray and supports eSIM.' },
+  { key: 'physical', label: 'Physical SIM Only', hint: 'Dual physical SIM, no eSIM.' },
+  { key: 'esim', label: 'eSIM Only', hint: 'No SIM tray (US models from the iPhone 14).' },
+];
+export const hasSimQuestion = (d) => {
+  if (!d || d.brand !== 'Apple' || d.type !== 'Phones' || /\bAir\b/.test(d.model || '')) return false;
+  const n = Number(((d.model || '').match(/iPhone\s+(\d+)/) || [])[1]);
+  return n >= 14;
+};
+/** Network answers that fit the SIM version picked (iPhone 14 and up). */
+export function networkOptionsFor(device, sim) {
+  if (!hasSimQuestion(device)) return NETWORK;
+  const keys = sim === 'esim' ? ['esim', 'locked', 'nodata'] : ['factory', 'chip', 'nodata'];
+  return keys.map((k) => NETWORK.find((n) => n.key === k)).filter(Boolean);
+}
+/** The SIM-version deduction: trade-in value × (1 − share), to the nearest ₦1,000. */
+export function simDeduction(device, sim, settings = {}) {
+  if (!hasSimQuestion(device) || !device.tradeInValue) return null;
+  const share = sim === 'esim' ? s(settings, 'model.esimOnlyShare') : sim === 'physical' ? s(settings, 'model.dualSimShare') : null;
+  if (share === null || share === undefined) return null;
+  return { key: 'sim', label: SIM.find((x) => x.key === sim).label, amount: Math.round((device.tradeInValue * (1 - share)) / 1000) * 1000 };
+}
+export const isPerfectOnly = (d) => isSpeaker(d) || PERFECT_ONLY_SERIES.includes(d?.series);
+export const perfectOnlyText = (d) => (isSpeaker(d) ? 'We only swap speakers in perfect condition.' : `We only swap the ${d?.series} series in perfect condition.`);
 
 export const NEATNESS = [
   { key: 'spotless', label: 'Spotless', hint: 'No marks at all, like it just left the box.' },
@@ -77,6 +110,7 @@ export const CONDITION_ORDER = [
   'Brand New',
   'Active Brand New',
   'Active Brand New (Non LLA)',
+  'Open Box',
   'Foreign USED',
   'Foreign USED (Non LLA)',
   'Nigerian USED',
@@ -136,8 +170,8 @@ export function valueDevice(device, answers = {}, settings = {}) {
   if (answers.icloudLocked) {
     return { accepted: false, reason: 'We can’t accept devices that are iCloud or activation locked. Remove the lock and check again.', start: 0, lines: [], pending: 0, value: 0 };
   }
-  if (isSpeaker(device) && answers.perfect === false) {
-    return { accepted: false, reason: 'We only swap speakers in perfect condition.', start: 0, lines: [], pending: 0, value: 0 };
+  if (isPerfectOnly(device) && answers.perfect === false) {
+    return { accepted: false, reason: perfectOnlyText(device), start: 0, lines: [], pending: 0, value: 0 };
   }
   if (!device.tradeIn) {
     return { accepted: false, reason: 'We don’t take this device as a trade-in yet.', start: 0, lines: [], pending: 0, value: 0 };
@@ -162,6 +196,10 @@ export function valueDevice(device, answers = {}, settings = {}) {
     if (base === 'n/a') return;
     lines.push({ key, label, amount: typeof base === 'number' ? Math.round(base * mult) : null });
   };
+
+  // SIM version first: eSIM only or Physical SIM only take a share off the Physical SIM + eSIM value.
+  const simLine = simDeduction(device, answers.sim, settings);
+  if (simLine && simLine.amount > 0) lines.push(simLine);
 
   // Battery
   const battery = Number(answers.battery);
@@ -190,7 +228,7 @@ export function valueDevice(device, answers = {}, settings = {}) {
         lines.push({ key: 'network', label: 'Chip Unlocked', amount: Math.max(s(settings, 'network.chipMin'), Math.round(net * share)) });
       } else push('network', 'Chip Unlocked', net, share);
     }
-    if (answers.network === 'esim' && !/\bAir\b/.test(device.model || '')) push('network', 'eSIM Only', amountFor(device, 'network'), s(settings, 'network.esimShare'));
+    if (answers.network === 'esim' && !hasSimQuestion(device) && !/\bAir\b/.test(device.model || '')) push('network', 'eSIM Only', amountFor(device, 'network'), s(settings, 'network.esimShare'));
     if (answers.network === 'locked') push('network', 'eSIM Locked', amountFor(device, 'network'), s(settings, 'network.lockedShare'));
     // No network at all costs the same as an eSIM-locked phone: either way it can't be used on a local network.
     if (answers.network === 'nodata') push('network', 'Mobile Data Issue', amountFor(device, 'network'), s(settings, 'network.lockedShare'));
@@ -239,7 +277,9 @@ export function termsLabel(t) {
 // ---------- ordering ----------
 
 export function storageRank(str = '') {
-  const m = String(str).toLowerCase().match(/(\d+(?:\.\d+)?)\s*(tb|gb|mm)?\s*$/);
+  // Storage can carry a SIM or connectivity label after the size ("256gb eSIM only", "128gb Cellular").
+  const s = String(str).toLowerCase();
+  const m = s.match(/(\d+(?:\.\d+)?)\s*(tb|gb|mm)/) || s.match(/(\d+(?:\.\d+)?)\s*$/);
   if (!m) return 0;
   const n = parseFloat(m[1]);
   return m[2] === 'tb' ? n * 1024 : n;
